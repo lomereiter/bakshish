@@ -3,7 +3,7 @@
   mapped to the unique reference sequence.
   No 'N's or other ambiguous bases in reads are allowed.
   
-  Memory usage: O(NTHREADS * GENOMELENGTH)
+  Memory usage: O(GENOMELENGTH)
 */
 
 import bio.bam.reader, bio.bam.read, bio.bam.md.core,
@@ -255,14 +255,6 @@ void fillKmerStats(ref SiteStats[] kmer_fwd_stats,
         kmer_rev_stats[kmer] += hstats.reverse;
         if (pos >= genome.length) break;
     }
-}
-
-void reverseGenomeAndStats(ref string genome, ref GenomeStats stats) {
-    swap(stats.forward, stats.reverse);
-    reverse(stats.forward);
-    reverse(stats.reverse);
-    // each indel must be moved to another end of the corresponding
-    // homopolymer
 }
 
 void main(string[] args) {
