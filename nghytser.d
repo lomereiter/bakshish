@@ -159,7 +159,7 @@ CigarOperation[] localCigar(size_t N, Cigar)(ref CigarOperation[N] cigar_buf,
     return cigar_buf[0 .. cigar_len];
 }
 
-void addRead(ref GenomeStats stats, BamRead read) {
+void addRead(ref GenomeStats stats, BamRead read, bool flip) {
     assert(!read.is_unmapped);
 
     CigarOperation[256] cigar_buf = void;
@@ -169,16 +169,25 @@ void addRead(ref GenomeStats stats, BamRead read) {
     auto md = read["MD"];
     enforce(md.is_string);
     string md_str = *cast(string*)(&md);    
-    auto deletions = mdOperations(md_str).filter!q{ a.is_deletion }
+    auto deletions = mdOperations(md_str).filterBidirectional!q{ a.is_deletion }
                                          .map!q{ a.deletion };
 
-    fixCigar(cigar, read.sequence, deletions);
+    SiteStats[] strand_stats;
+    size_t position;
 
-    auto strand_stats = read.strand == '+' ? stats.forward[] : stats.reverse[];
+    if (!flip) {
+        position = read.position;
+        fixCigar(cigar, read.sequence, deletions);
+        strand_stats = read.strand == '+' ? stats.forward[] : stats.reverse[];
+    } else {
+        position = stats.forward.length - 1 - (read.position + read.basesCovered());
+        reverse(cigar);
+        fixCigar(cigar, read.sequence.retro.map!complementBase, deletions.retro);
+        strand_stats = read.strand == '-' ? stats.forward[] : stats.reverse[];
+    }
 
     while (!cigar.front.is_reference_consuming)
         cigar.popFront();
-    size_t position = read.position;
 
     foreach (op; cigar) {
         if (position >= strand_stats.length)
@@ -231,40 +240,60 @@ auto advance(ref uint kmer, string genome, ref size_t pos,
     return Tuple!(SiteStats, "forward", SiteStats, "reverse")(fwd, rev);
 }
 
+void fillKmerStats(ref SiteStats[] kmer_fwd_stats,
+                   ref SiteStats[] kmer_rev_stats,
+                   ref GenomeStats stats, string genome, ubyte n)
+{
+    uint kmer = 0;
+    size_t pos = 0;
+
+    for (; pos < n - 1; ++pos) shift(kmer, genome[pos], n);
+    
+    while (true) {
+        auto hstats = advance(kmer, genome, pos, stats, n);
+        kmer_fwd_stats[kmer] += hstats.forward;
+        kmer_rev_stats[kmer] += hstats.reverse;
+        if (pos >= genome.length) break;
+    }
+}
+
+void reverseGenomeAndStats(ref string genome, ref GenomeStats stats) {
+    swap(stats.forward, stats.reverse);
+    reverse(stats.forward);
+    reverse(stats.reverse);
+    // each indel must be moved to another end of the corresponding
+    // homopolymer
+}
+
 void main(string[] args) {
+    auto n = args[3].to!ubyte;
     import std.parallelism;
     defaultPoolThreads = 15;
     auto bam = new BamReader(args[1]);
     bam.assumeSequentialProcessing();
     auto genome = fastaRecords(args[2]).front.sequence;
-    auto n = args[3].to!ubyte;
+    auto rgenome = genome.retro.map!(nuc => Base5(nuc).complement).array();
+
     enforce(n >= 3, "k-mer length must be at least 3");
     enforce(n <= 12, "k-mer length must be at most 12");
     auto stats = GenomeStats(genome.length);
+    auto rstats = GenomeStats(rgenome.length);
 
     foreach (read; bam.reads().filter!(r => !r.is_unmapped &&
                                             !r.is_secondary_alignment &&
-                                            !r.is_duplicate))
-        stats.addRead(read);
+                                       !r.is_duplicate))
+    {
+        stats.addRead(read, false);
+        rstats.addRead(read, true);
+    }
 
     auto kmer_fwd_stats = new SiteStats[](4 ^^ n);
     auto kmer_rev_stats = new SiteStats[](4 ^^ n);
 
     // collect per-kmer stats
-    {
-        uint kmer = 0;
-        size_t pos = 0;
-
-        for (; pos < n - 1; ++pos) shift(kmer, genome[pos], n);
-    
-        while (true) {
-            auto hstats = advance(kmer, genome, pos, stats, n);
-            kmer_fwd_stats[kmer] += hstats.forward;
-            kmer_rev_stats[kmer] += hstats.reverse;
-            if (pos >= genome.length) break;
-        }
-    }
-    
+    fillKmerStats(kmer_fwd_stats, kmer_rev_stats, stats, genome, n);
+    fillKmerStats(kmer_fwd_stats, kmer_rev_stats, rstats, genome, n);
+        
     auto kmer_str = new char[n];
     foreach (kmer; 0 .. 4 ^^ n) {
         uint[2][2] table = void;
