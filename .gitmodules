@@ -1,0 +1,6 @@
+[submodule "dstats"]
+	path = dstats
+	url = git@github.com:lomereiter/dstats.git
+[submodule "BioD"]
+	path = BioD
+	url = git@github.com:biod/BioD.git
