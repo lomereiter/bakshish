@@ -1,5 +1,5 @@
 debug:
-	rdmd --force --build-only -IBioD nghytser.d
+	rdmd --force --build-only -IBioD bakshish.d
 
 release:
-	rdmd --force --build-only --compiler=ldmd2 -IBioD -O -release -inline nghytser.d
+	rdmd --force --build-only --compiler=ldmd2 -IBioD -O -release -inline bakshish.d
