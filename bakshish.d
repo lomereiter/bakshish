@@ -257,14 +257,104 @@ void fillKmerStats(ref SiteStats[] kmer_fwd_stats,
     }
 }
 
-void main(string[] args) {
-    auto n = args[3].to!ubyte;
+static enum help_sections =
+    ["main" :
+     "Usage: bakshish [subcommand] [subcommand-specific options]\n"
+     "       where subcommand is one of 'collect', 'merge', 'aggregate'\n"
+     "\n"
+     "       To get help about each subcommand, call it without options.\n"
+     "\n"
+     "       'collect' subcommand collects statistics about errors\n"
+     "                 at the end of each k-mer\n"
+     "\n"
+     "       'merge' subcommand merges multiple lists produced by 'collect',\n"
+     "               allowing to get more statistical power by considering\n"
+     "               several BAM files\n"
+     "\n"
+     "       'aggregate' subcommand aims at searching motifs of length k\n"
+     "                   with m 'N's inside, aggregating information from all\n"
+     "                   k-mers matching each such pattern",
+
+     "collect" :
+     "Usage: bakshish collect <input.bam> <genome.fasta> <K>\n"
+     "\n"
+     "       Input BAM file must contain reads mapped to the same chromosome,\n"
+     "       which is the first entry in the provided FASTA file; these reads\n"
+     "       must also contain MD tags (TMAP writes them by default).\n"
+     "\n"
+     "       For each K-mer seen in the genome (and its reverse-complement)\n"
+     "       the tool assesses strand bias in the errors at its end.\n"
+     "\n"
+     "       The results are output to <input.bam.kmer_stats.K> file\n"
+     "       in table form."
+     ];
+
+void printHelp(string section="main") {
+    stderr.writeln(help_sections[section]);
+}
+
+int main(string[] args) {
     import std.parallelism;
     defaultPoolThreads = 15;
-    auto bam = new BamReader(args[1]);
+
+    if (args.length == 0) {
+        printHelp();
+        return 0;
+    }
+
+    switch (args[1]) {
+    case "collect":
+        args = args[1 .. $];
+        if (args.length < 4) {
+            printHelp("collect");
+            return -1;
+        }
+        auto n = args[3].to!ubyte;
+        collectKmerStats(args[1], args[2], n, args[1] ~ ".kmer_stats." ~ n.to!string);
+        break;
+    case "merge":
+    case "aggregate":
+        stderr.writeln("NOT YET IMPLEMENTED");
+        break;
+    default:
+        printHelp();
+        break;
+    }
+    return 0;
+}
+
+double computePValue(uint kmer,
+                     SiteStats[] kmer_fwd_stats, SiteStats[] kmer_rev_stats)
+{
+    uint[2][2] table = void;
+    table[0][0] = kmer_fwd_stats[kmer].errors;
+    table[0][1] = kmer_fwd_stats[kmer].matches;
+    table[1][0] = kmer_rev_stats[kmer].errors;
+    table[1][1] = kmer_rev_stats[kmer].matches;
+
+    if (table[0][].chain(table[1][]).all!(x => x == 0))
+        return 1;
+
+    bool use_chisq = table[0][].chain(table[1][]).any!(x => x > 5000);
+
+    double p;
+    if (use_chisq) {
+        uint[][2] t = void; t[0] = table[0][]; t[1] = table[1][];
+        return chiSquareContingency(t[]).p;
+    } else {
+        return fisherExact(table).p;
+    }
+}
+
+void collectKmerStats(string bam_filename, string fasta_filename, ubyte n,
+                      string output_filename)
+{
+    auto bam = new BamReader(bam_filename);
     bam.assumeSequentialProcessing();
-    auto genome = fastaRecords(args[2]).front.sequence;
+    auto genome = fastaRecords(fasta_filename).front.sequence;
     auto rgenome = genome.retro.map!(nuc => Base5(nuc).complement).array();
+
+    auto output_file = File(output_filename, "w+");
 
     enforce(n >= 3, "k-mer length must be at least 3");
     enforce(n <= 12, "k-mer length must be at most 12");
@@ -286,35 +376,22 @@ void main(string[] args) {
     fillKmerStats(kmer_fwd_stats, kmer_rev_stats, stats, genome, n);
     fillKmerStats(kmer_fwd_stats, kmer_rev_stats, rstats, genome, n);
         
+    output_file.writeln("kmer\tfm\tfmm\tfi\tfd\trm\trmm\tri\trd\tp");
     auto kmer_str = new char[n];
     foreach (kmer; 0 .. 4 ^^ n) {
-        uint[2][2] table = void;
-        table[0][0] = kmer_fwd_stats[kmer].errors;
-        table[0][1] = kmer_fwd_stats[kmer].matches;
-        table[1][0] = kmer_rev_stats[kmer].errors;
-        table[1][1] = kmer_rev_stats[kmer].matches;
-
-        if (table[0][].chain(table[1][]).all!(x => x == 0))
-            continue;
-
-        bool use_chisq = table[0][].chain(table[1][]).any!(x => x > 5000);
-
-        double p;
-        if (use_chisq) {
-          uint[][2] t = void; t[0] = table[0][]; t[1] = table[1][];
-          p = chiSquareContingency(t[]).p;
-        } else {
-          p = fisherExact(table).p;
-        }
-
+        auto p = computePValue(kmer, kmer_fwd_stats, kmer_rev_stats);
         foreach (j; 0 .. n)
             kmer_str[n - j - 1] = Base5.fromInternalCode((kmer >> (2 * j)) & 3);
 
-        writeln(kmer_str, "\t",
-                kmer_fwd_stats[kmer].matches, "\t", kmer_fwd_stats[kmer].mismatches, "\t",
-                kmer_fwd_stats[kmer].insertions, "\t", kmer_fwd_stats[kmer].deletions, "\t",
-                kmer_rev_stats[kmer].matches, "\t", kmer_rev_stats[kmer].mismatches, "\t",
-                kmer_rev_stats[kmer].insertions, "\t", kmer_rev_stats[kmer].deletions, "\t",
-                p);
+        output_file.writeln(kmer_str, "\t",
+                            kmer_fwd_stats[kmer].matches, "\t",
+                            kmer_fwd_stats[kmer].mismatches, "\t",
+                            kmer_fwd_stats[kmer].insertions, "\t",
+                            kmer_fwd_stats[kmer].deletions, "\t",
+                            kmer_rev_stats[kmer].matches, "\t",
+                            kmer_rev_stats[kmer].mismatches, "\t",
+                            kmer_rev_stats[kmer].insertions, "\t",
+                            kmer_rev_stats[kmer].deletions, "\t",
+                            p);
     }
 }
